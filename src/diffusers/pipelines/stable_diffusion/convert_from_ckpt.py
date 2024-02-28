@@ -1539,17 +1539,30 @@ def download_from_original_stable_diffusion_ckpt(
             )
 
         if stable_unclip is None:
-            if controlnet:
-                pipe = pipeline_class(
-                    vae=vae,
-                    text_encoder=text_model,
-                    tokenizer=tokenizer,
-                    unet=unet,
-                    scheduler=scheduler,
-                    controlnet=controlnet,
-                    safety_checker=safety_checker,
-                    feature_extractor=feature_extractor,
-                )
+            if controlnet or adapter:
+                if controlnet:
+                    pipe = pipeline_class(
+                        vae=vae,
+                        text_encoder=text_model,
+                        tokenizer=tokenizer,
+                        unet=unet,
+                        scheduler=scheduler,
+                        controlnet=controlnet,
+                        safety_checker=safety_checker,
+                        feature_extractor=feature_extractor,
+                    )
+                elif adapter:
+                    pipe = pipeline_class(
+                        vae=vae,
+                        text_encoder=text_model,
+                        tokenizer=tokenizer,
+                        unet=unet,
+                        scheduler=scheduler,
+                        adapter=adapter,
+                        safety_checker=safety_checker,
+                        feature_extractor=feature_extractor,
+                    )
+
                 if hasattr(pipe, "requires_safety_checker"):
                     pipe.requires_safety_checker = False
 
@@ -1702,17 +1715,29 @@ def download_from_original_stable_diffusion_ckpt(
                 "CompVis/stable-diffusion-safety-checker", local_files_only=local_files_only
             )
 
-        if controlnet:
-            pipe = pipeline_class(
-                vae=vae,
-                text_encoder=text_model,
-                tokenizer=tokenizer,
-                unet=unet,
-                controlnet=controlnet,
-                scheduler=scheduler,
-                safety_checker=safety_checker,
-                feature_extractor=feature_extractor,
-            )
+        if controlnet or adapter:
+            if controlnet:
+                pipe = pipeline_class(
+                    vae=vae,
+                    text_encoder=text_model,
+                    tokenizer=tokenizer,
+                    unet=unet,
+                    controlnet=controlnet,
+                    scheduler=scheduler,
+                    safety_checker=safety_checker,
+                    feature_extractor=feature_extractor,
+                )
+            elif adapter:
+                pipe = pipeline_class(
+                    vae=vae,
+                    text_encoder=text_model,
+                    tokenizer=tokenizer,
+                    unet=unet,
+                    adapter=adapter,
+                    scheduler=scheduler,
+                    safety_checker=safety_checker,
+                    feature_extractor=feature_extractor,
+                )
         else:
             pipe = pipeline_class(
                 vae=vae,

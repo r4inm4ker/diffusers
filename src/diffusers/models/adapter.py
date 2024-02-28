@@ -47,9 +47,9 @@ class MultiAdapter(ModelMixin):
         if len(adapters) == 0:
             raise ValueError("Expecting at least one adapter")
 
-        if len(adapters) == 1:
-            raise ValueError("For a single adapter, please use the `T2IAdapter` class instead of `MultiAdapter`")
-
+        # if len(adapters) == 1:
+            # raise ValueError("For a single adapter, please use the `T2IAdapter` class instead of `MultiAdapter`")
+        #
         # The outputs from each adapter are added together with a weight.
         # This means that the change in dimensions from downsampling must
         # be the same for all adapters. Inductively, it also means the

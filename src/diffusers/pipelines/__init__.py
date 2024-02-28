@@ -421,6 +421,7 @@ else:
     _import_structure["t2i_adapter"] = [
         "StableDiffusionAdapterPipeline",
         "StableDiffusionXLAdapterPipeline",
+        "StableDiffusionXLAdapterImg2ImgPipeline",
     ]
     _import_structure["wan"] = [
         "WanPipeline",
@@ -910,6 +911,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .t2i_adapter import (
             StableDiffusionAdapterPipeline,
             StableDiffusionXLAdapterPipeline,
+            StableDiffusionXLAdapterImg2ImgPipeline
         )
         from .visualcloze import VisualClozeGenerationPipeline, VisualClozePipeline
         from .wan import (

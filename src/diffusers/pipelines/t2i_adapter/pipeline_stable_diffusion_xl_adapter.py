@@ -286,6 +286,9 @@ class StableDiffusionXLAdapterPipeline(
     ):
         super().__init__()
 
+        if isinstance(adapter, (list, tuple)):
+            adapter = MultiAdapter(adapter)
+
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,

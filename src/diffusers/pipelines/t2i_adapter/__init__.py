@@ -23,6 +23,7 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["pipeline_stable_diffusion_adapter"] = ["StableDiffusionAdapterPipeline"]
     _import_structure["pipeline_stable_diffusion_xl_adapter"] = ["StableDiffusionXLAdapterPipeline"]
+    _import_structure["pipeline_stable_diffusion_xl_adapter_img2img"] = ["StableDiffusionXLAdapterImg2ImgPipeline"]
 
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
@@ -34,6 +35,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     else:
         from .pipeline_stable_diffusion_adapter import StableDiffusionAdapterPipeline
         from .pipeline_stable_diffusion_xl_adapter import StableDiffusionXLAdapterPipeline
+        from .pipeline_stable_diffusion_xl_adapter_img2img import StableDiffusionXLAdapterImg2ImgPipeline
 else:
     import sys
 
