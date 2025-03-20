@@ -732,6 +732,8 @@ class LoraBaseMixin:
         list_adapters = self.get_list_adapters()  # eg {"unet": ["adapter1", "adapter2"], "text_encoder": ["adapter2"]}
         # eg ["adapter1", "adapter2"]
         all_adapters = {adapter for adapters in list_adapters.values() for adapter in adapters}
+        print("ALL ADAPTERS:")
+        print(all_adapters)
         missing_adapters = set(adapter_names) - all_adapters
         if len(missing_adapters) > 0:
             raise ValueError(

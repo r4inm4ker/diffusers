@@ -1067,6 +1067,8 @@ class SD3LoraLoaderMixin(LoraBaseMixin):
         if not USE_PEFT_BACKEND:
             raise ValueError("PEFT backend is required for this method.")
 
+        print("LOADING LORA WEIGHT")
+
         low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", _LOW_CPU_MEM_USAGE_DEFAULT_LORA)
         if low_cpu_mem_usage and is_peft_version("<", "0.13.0"):
             raise ValueError(

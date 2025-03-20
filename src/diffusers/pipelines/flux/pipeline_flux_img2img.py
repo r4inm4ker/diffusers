@@ -713,6 +713,8 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
         latents = self.scheduler.scale_noise(image_latents, timestep, noise)
         latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        # del image
+        # del image_latents
         return latents, latent_image_ids
 
     @property
