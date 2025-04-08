@@ -21,7 +21,7 @@ import torch
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
-from diffusers.loaders import FluxLoraLoaderMixin
+from diffusers.loaders import FluxLoraLoaderMixin, FluxIPAdapterMixin, FromSingleFileMixin
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.transformers import FluxTransformer2DModel
 from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput
@@ -169,7 +169,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class FluxDifferentialImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
+class FluxDifferentialImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin,FromSingleFileMixin, FluxIPAdapterMixin):
     r"""
     Differential Image to Image pipeline for the Flux family of models.
 
@@ -196,8 +196,8 @@ class FluxDifferentialImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             [T5TokenizerFast](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5TokenizerFast).
     """
 
-    model_cpu_offload_seq = "text_encoder->text_encoder_2->transformer->vae"
-    _optional_components = []
+    model_cpu_offload_seq = "text_encoder->text_encoder_2->image_encoder->transformer->vae"
+    _optional_components = ["image_encoder", "feature_extractor"]
     _callback_tensor_inputs = ["latents", "prompt_embeds"]
 
     def __init__(
