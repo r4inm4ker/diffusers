@@ -521,7 +521,7 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
                     # Apply differential mask
                     # mask_raw: (B, 1, H, W), thresholds[i]: scalar
                     current_mask_raw = (mask_raw > thresholds[i]).to(latents_dtype)
-                    current_mask_packed = self._pack_latents(current_mask_raw.repeat(1, num_channels_latents, 1, 1))
+                    current_mask_packed = self._pack_latents(current_mask_raw.repeat(1, num_channels_latents * 4, 1, 1))
                     
                     latents = image_latent * current_mask_packed + latents * (1 - current_mask_packed)
 
