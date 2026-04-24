@@ -476,52 +476,20 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
         original_image_latents = self._encode_vae_image(init_image, generator=generator)
         original_image_latents = self._pack_latents(original_image_latents)
 
-        # Process mask
-        original_mask = self.mask_processor.preprocess(mask_image, height=height, width=width)
-        original_mask = self.prepare_mask_latents(
-            original_mask, 
-            batch_size * num_images_per_prompt, 
-            num_channels_latents, 
-            height, 
-            width, 
-            prompt_embeds.dtype, 
-            device
-        )
-
-        # Differential masking thresholding
-        mask_thresholds = torch.arange(num_inference_steps, dtype=original_mask.dtype) / num_inference_steps
-        mask_thresholds = mask_thresholds.reshape(-1, 1, 1).to(device) # (steps, 1, 1) - wait, packed is (B, L, C)
-        # original_mask is (B, L, C). mask_thresholds needs to be (steps, 1, 1)
-        # Since C is constant, we can compare against the first channel or just use a simplified mask.
-        # Let's fix the mask shape for thresholding.
-        
-        # For packed masks, original_mask is (B, L, C). 
-        # Let's use a 1-channel mask for thresholding and then expand.
-        mask_1ch = torch.nn.functional.interpolate(
-            original_mask[:, 0:1, :, :], # This is not correct for packed.
-            size=(height // (self.vae_scale_factor * 2), width // (self.vae_scale_factor * 2))
-        )
-        # Let's redo the mask preparation to keep a 1ch version.
-        
-        # Redo:
+        # Process mask for differential diffusion
         mask_raw = self.mask_processor.preprocess(mask_image, height=height, width=width)
         mask_raw = torch.nn.functional.interpolate(mask_raw, size=(height // (self.vae_scale_factor * 2), width // (self.vae_scale_factor * 2)))
         mask_raw = mask_raw.to(device=device, dtype=prompt_embeds.dtype)
         if mask_raw.shape[0] < (batch_size * num_images_per_prompt):
             mask_raw = mask_raw.repeat((batch_size * num_images_per_prompt) // mask_raw.shape[0], 1, 1, 1)
         
-        # packed mask for blending
-        packed_mask = self._pack_latents(mask_raw.repeat(1, num_channels_latents, 1, 1))
-        
-        # Mask thresholds for differential diffusion
-        # mask = original_mask > (step / total_steps)
-        # mask_raw is (B, 1, H, W)
+        # Mask thresholds for differential diffusion: mask = original_mask > (step / total_steps)
         thresholds = torch.arange(num_inference_steps, dtype=prompt_embeds.dtype, device=device) / num_inference_steps
         
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                if self.interrupt:
+                if self._interrupt:
                     continue
 
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
@@ -534,7 +502,7 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
                     encoder_hidden_states=prompt_embeds,
                     txt_ids=text_ids,
                     img_ids=latent_ids,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
+                    joint_attention_kwargs=self._attention_kwargs,
                     return_dict=False,
                 )[0]
 
@@ -543,9 +511,11 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
 
                 if i < len(timesteps) - 1:
                     noise_timestep = timesteps[i + 1]
+                    # Generate noise for scaling original image latents
+                    noise = randn_tensor(original_image_latents.shape, generator=generator, device=device, dtype=original_image_latents.dtype)
                     # Scale original image latents with noise
                     image_latent = self.scheduler.scale_noise(
-                        original_image_latents, torch.tensor([noise_timestep], device=device), None
+                        original_image_latents, torch.tensor([noise_timestep], device=device), noise
                     )
 
                     # Apply differential mask
