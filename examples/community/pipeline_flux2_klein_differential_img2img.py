@@ -25,6 +25,9 @@ from diffusers.loaders import Flux2LoraLoaderMixin
 from diffusers.models.autoencoders import AutoencoderKLFlux2
 from diffusers.models.transformers import Flux2Transformer2DModel
 from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
+from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
+from diffusers.models.transformers import Flux2Transformer2DModel
+from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import (
@@ -148,6 +151,7 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
         text_encoder: Qwen3ForCausalLM,
         tokenizer: Qwen2TokenizerFast,
         transformer: Flux2Transformer2DModel,
+        is_distilled: bool = False,
     ):
         super().__init__()
 
@@ -158,9 +162,10 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
             scheduler=scheduler,
             transformer=transformer,
         )
+        self.register_to_config(is_distilled=is_distilled)
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor * 2)
+        self.image_processor = Flux2ImageProcessor(vae_scale_factor=self.vae_scale_factor * 2)
         
         # Mask processor should match the resolution of the latents before packing
         # Flux2 latents are (B, C, H, W) where H, W are height/width // (vae_scale_factor * 2)
@@ -177,6 +182,14 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
         )
         self.tokenizer_max_length = 512
         self.default_sample_size = 128
+
+    @property
+    def guidance_scale(self):
+        return self._guidance_scale
+
+    @property
+    def do_classifier_free_guidance(self):
+        return self._guidance_scale > 1 and not self.config.is_distilled
 
     def _get_qwen3_prompt_embeds(
         self,
@@ -408,12 +421,14 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: str | None = "pil",
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        text_encoder_out_layers: tuple[int] = (9, 18, 27),
     ):
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
@@ -438,9 +453,25 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
             device=device,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
+            text_encoder_out_layers=text_encoder_out_layers,
         )
 
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+        if self.do_classifier_free_guidance:
+            negative_prompt = ""
+            if prompt is not None and isinstance(prompt, list):
+                negative_prompt = [negative_prompt] * len(prompt)
+            negative_prompt_embeds, negative_text_ids = self.encode_prompt(
+                prompt=negative_prompt,
+                prompt_embeds=negative_prompt_embeds,
+                device=device,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+                text_encoder_out_layers=text_encoder_out_layers,
+            )
+
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if timesteps is None else None
+        if hasattr(self.scheduler.config, "use_flow_sigmas") and self.scheduler.config.use_flow_sigmas:
+            sigmas = None
         image_seq_len = (height // (self.vae_scale_factor * 2)) * (width // (self.vae_scale_factor * 2))
         mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=num_inference_steps)
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -478,7 +509,9 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
 
         # Process mask for differential diffusion
         mask_raw = self.mask_processor.preprocess(mask_image, height=height, width=width)
-        mask_raw = torch.nn.functional.interpolate(mask_raw, size=(height // (self.vae_scale_factor * 2), width // (self.vae_scale_factor * 2)))
+        mask_h = height // (self.vae_scale_factor * 2)
+        mask_w = width // (self.vae_scale_factor * 2)
+        mask_raw = torch.nn.functional.interpolate(mask_raw, size=(mask_h, mask_w))
         mask_raw = mask_raw.to(device=device, dtype=prompt_embeds.dtype)
         if mask_raw.shape[0] < (batch_size * num_images_per_prompt):
             mask_raw = mask_raw.repeat((batch_size * num_images_per_prompt) // mask_raw.shape[0], 1, 1, 1)
@@ -495,16 +528,31 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 
                 # Flux2 Transformer call
-                noise_pred = self.transformer(
-                    hidden_states=latents,
-                    timestep=timestep / 1000,
-                    guidance=None, # Flux2 Klein often uses guidance internally or via a different mechanism
-                    encoder_hidden_states=prompt_embeds,
-                    txt_ids=text_ids,
-                    img_ids=latent_ids,
-                    joint_attention_kwargs=self._attention_kwargs,
-                    return_dict=False,
-                )[0]
+                with self.transformer.cache_context("cond"):
+                    noise_pred = self.transformer(
+                        hidden_states=latents,
+                        timestep=timestep / 1000,
+                        guidance=None,
+                        encoder_hidden_states=prompt_embeds,
+                        txt_ids=text_ids,
+                        img_ids=latent_ids,
+                        joint_attention_kwargs=self._attention_kwargs,
+                        return_dict=False,
+                    )[0]
+
+                if self.do_classifier_free_guidance:
+                    with self.transformer.cache_context("uncond"):
+                        neg_noise_pred = self.transformer(
+                            hidden_states=latents,
+                            timestep=timestep / 1000,
+                            guidance=None,
+                            encoder_hidden_states=negative_prompt_embeds,
+                            txt_ids=negative_text_ids,
+                            img_ids=latent_ids,
+                            joint_attention_kwargs=self._attention_kwargs,
+                            return_dict=False,
+                        )[0]
+                    noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
 
                 latents_dtype = latents.dtype
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
