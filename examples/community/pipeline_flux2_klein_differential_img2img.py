@@ -24,9 +24,7 @@ from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
 from diffusers.loaders import Flux2LoraLoaderMixin
 from diffusers.models.autoencoders import AutoencoderKLFlux2
 from diffusers.models.transformers import Flux2Transformer2DModel
-from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
-from diffusers.models.transformers import Flux2Transformer2DModel
 from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
@@ -335,12 +333,16 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
         image_latents = retrieve_latents(self.vae.encode(image), generator=generator, sample_mode="argmax")
         image_latents = self._patchify_latents(image_latents)
         latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(image_latents.device, image_latents.dtype)
-        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps)
+        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
+            image_latents.device, image_latents.dtype
+        )
         image_latents = (image_latents - latents_bn_mean) / latents_bn_std
         return image_latents
 
     def prepare_latents(
         self,
+        image,
+        timestep,
         batch_size,
         num_latents_channels,
         height,
@@ -353,14 +355,32 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
         height = 2 * (int(height) // (self.vae_scale_factor * 2))
         width = 2 * (int(width) // (self.vae_scale_factor * 2))
         shape = (batch_size, num_latents_channels * 4, height // 2, width // 2)
+
+        image = image.to(device=device, dtype=dtype)
+        image_latents = self._encode_vae_image(image=image, generator=generator)
+
+        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+            additional_image_per_prompt = batch_size // image_latents.shape[0]
+            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+            raise ValueError(
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+            )
+
         if latents is None:
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            latents = self.scheduler.scale_noise(image_latents, timestep, noise)
         else:
-            latents = latents.to(device=device, dtype=dtype)
+            noise = latents.to(device)
+            latents = noise
+
         latent_ids = self._prepare_latent_ids(latents)
         latent_ids = latent_ids.to(device)
+
+        noise = self._pack_latents(noise)
+        image_latents = self._pack_latents(image_latents)
         latents = self._pack_latents(latents)
-        return latents, latent_ids
+        return latents, noise, image_latents, latent_ids
 
     def prepare_mask_latents(
         self,
@@ -487,7 +507,17 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
             raise ValueError(f"Adjusted num_inference_steps {num_inference_steps} is < 1.")
 
         num_channels_latents = self.transformer.config.in_channels // 4
-        latents, latent_ids = self.prepare_latents(
+
+        # Preprocess image
+        init_image = self.image_processor.preprocess(image, height=height, width=width)
+        init_image = init_image.to(device=device, dtype=prompt_embeds.dtype)
+
+        latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
+
+        # Prepare latents: encode image + noise to starting timestep
+        latents, noise, original_image_latents, latent_ids = self.prepare_latents(
+            init_image,
+            latent_timestep,
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -498,27 +528,22 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
             latents,
         )
 
-        # Differential diffusion setup
-        # 1. Preprocess mask and image
-        init_image = self.image_processor.preprocess(image, height=height, width=width)
-        init_image = init_image.to(device=device, dtype=prompt_embeds.dtype)
-        
-        # Original image latents for blending
-        original_image_latents = self._encode_vae_image(init_image, generator=generator)
-        original_image_latents = self._pack_latents(original_image_latents)
-
         # Process mask for differential diffusion
-        mask_raw = self.mask_processor.preprocess(mask_image, height=height, width=width)
+        original_mask = self.mask_processor.preprocess(mask_image, height=height, width=width)
         mask_h = height // (self.vae_scale_factor * 2)
         mask_w = width // (self.vae_scale_factor * 2)
-        mask_raw = torch.nn.functional.interpolate(mask_raw, size=(mask_h, mask_w))
-        mask_raw = mask_raw.to(device=device, dtype=prompt_embeds.dtype)
-        if mask_raw.shape[0] < (batch_size * num_images_per_prompt):
-            mask_raw = mask_raw.repeat((batch_size * num_images_per_prompt) // mask_raw.shape[0], 1, 1, 1)
-        
-        # Mask thresholds for differential diffusion: mask = original_mask > (step / total_steps)
-        thresholds = torch.arange(num_inference_steps, dtype=prompt_embeds.dtype, device=device) / num_inference_steps
-        
+        original_mask = torch.nn.functional.interpolate(original_mask, size=(mask_h, mask_w))
+        original_mask = original_mask.to(device=device, dtype=prompt_embeds.dtype)
+        if original_mask.shape[0] < (batch_size * num_images_per_prompt):
+            original_mask = original_mask.repeat((batch_size * num_images_per_prompt) // original_mask.shape[0], 1, 1, 1)
+
+        # Pre-compute per-step binary masks for differential diffusion
+        # Pack mask to match latent layout: (B, 1, H, W) -> repeat channels -> pack to (B, H*W, C)
+        original_mask_packed = self._pack_latents(original_mask.repeat(1, num_channels_latents * 4, 1, 1))
+        mask_thresholds = torch.arange(num_inference_steps, dtype=original_mask_packed.dtype) / num_inference_steps
+        mask_thresholds = mask_thresholds.reshape(-1, 1, 1).to(device)
+        masks = original_mask_packed > mask_thresholds
+
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -526,7 +551,7 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
                     continue
 
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                
+
                 # Flux2 Transformer call
                 with self.transformer.cache_context("cond"):
                     noise_pred = self.transformer(
@@ -559,26 +584,21 @@ class Flux2KleinDifferentialImg2ImgPipeline(DiffusionPipeline, Flux2LoraLoaderMi
 
                 if i < len(timesteps) - 1:
                     noise_timestep = timesteps[i + 1]
-                    # Generate noise for scaling original image latents
-                    noise = randn_tensor(original_image_latents.shape, generator=generator, device=device, dtype=original_image_latents.dtype)
-                    # Scale original image latents with noise
+                    # Re-noise original image latents to the next timestep using the same noise
                     image_latent = self.scheduler.scale_noise(
-                        original_image_latents, torch.tensor([noise_timestep], device=device), noise
+                        original_image_latents, torch.tensor([noise_timestep]), noise
                     )
 
-                    # Apply differential mask
-                    # mask_raw: (B, 1, H, W), thresholds[i]: scalar
-                    current_mask_raw = (mask_raw > thresholds[i]).to(latents_dtype)
-                    current_mask_packed = self._pack_latents(current_mask_raw.repeat(1, num_channels_latents * 4, 1, 1))
-                    
-                    latents = image_latent * current_mask_packed + latents * (1 - current_mask_packed)
+                    # Apply differential mask: mask=1 keeps noised original, mask=0 keeps denoised
+                    mask = masks[i].to(latents_dtype)
+                    latents = image_latent * mask + latents * (1 - mask)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs if k in locals()}
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                
+
                 progress_bar.update()
 
         # Finalize and decode
