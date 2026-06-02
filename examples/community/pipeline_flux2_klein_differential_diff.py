@@ -112,14 +112,24 @@ class Flux2KleinDifferentialDiffPipeline(DiffusionPipeline, Flux2LoraLoaderMixin
             transformer=transformer,
         )
         self.is_distilled = is_distilled
+        # Scale factor and latent channels (matches inpaint pipeline)
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-        self.register_to_config(is_distilled=is_distilled)
-        self.default_sample_size = (
-            self.transformer.config.sample_size
-            if hasattr(self, "transformer") and self.transformer is not None
-            else 128
+        self.latent_channels = self.vae.config.latent_channels if getattr(self, "vae", None) else 32
+
+        # Use Flux2ImageProcessor (same as inpaint) for image handling
+        self.image_processor = Flux2ImageProcessor(
+            vae_scale_factor=self.vae_scale_factor * 2, vae_latent_channels=self.latent_channels
         )
+
+        # Processor for the differential map (no special mask handling needed)
+        self.map_processor = Flux2ImageProcessor(
+            vae_scale_factor=self.vae_scale_factor * 2, vae_latent_channels=self.latent_channels
+        )
+
+        self.tokenizer_max_length = 512
+
+        # Default sample size – keep consistent with inpaint pipeline
+        self.default_sample_size = 128
 
     # ---------------------------------------------------------------------
     # Helper methods (copied from the original inpainting pipeline)
@@ -187,10 +197,52 @@ class Flux2KleinDifferentialDiffPipeline(DiffusionPipeline, Flux2LoraLoaderMixin
     ) -> Union[Flux2PipelineOutput, Tuple]:
         """Generate images using differential diffusion.
 
-        The arguments match the original inpainting pipeline.  The additional
-        ``map`` parameter enables differential updates: regions where ``map``
-        is close to ``1`` retain more of the source image, while regions close to
-        ``0`` are fully guided by the diffusion process.
+        Args:
+            prompt (Union[str, List[str]]): Text prompt to guide image generation.
+            image (PipelineImageInput): Source image to be edited.
+            strength (float): How much noise to add; 0.0 retains the original image, 1.0 ignores it.
+            height (int, optional): Desired output height. Defaults to ``original_size`` height.
+            width (int, optional): Desired output width. Defaults to ``original_size`` width.
+            num_inference_steps (int, optional): Number of diffusion steps.
+            timesteps (List[int], optional): Custom timesteps for the scheduler.
+            sigmas (List[float], optional): Custom sigmas for the scheduler.
+            guidance_scale (float, optional): Classifier‑free guidance scale.
+            negative_prompt (Union[str, List[str]], optional): Prompt for negative guidance.
+            num_images_per_prompt (int, optional): Number of images to generate per prompt.
+            eta (float, optional): Parameter for DDIM scheduler; ignored for others.
+            generator (torch.Generator or List[torch.Generator], optional): Random generator.
+            latents (torch.Tensor, optional): Pre‑computed latents.
+            prompt_embeds (torch.Tensor, optional): Pre‑computed prompt embeddings.
+            negative_prompt_embeds (torch.Tensor, optional): Pre‑computed negative prompt embeddings.
+            prompt_attention_mask (torch.Tensor, optional): Attention mask for prompt embeddings.
+            negative_prompt_attention_mask (torch.Tensor, optional): Attention mask for negative prompt embeddings.
+            output_type (str, optional): ``"pil"`` or ``"np"``.
+            return_dict (bool, optional): Whether to return a ``Flux2PipelineOutput``.
+            callback_on_step_end (callable, optional): Callback after each denoising step.
+            callback_on_step_end_tensor_inputs (List[str], optional): Tensors passed to the callback.
+            guidance_rescale (float, optional): Guidance rescaling factor.
+            original_size (Tuple[int, int], optional): Original image size for resolution binning.
+            target_size (Tuple[int, int], optional): Desired target size after binning.
+            crops_coords_top_left (Tuple[int, int], optional): Top‑left coordinates for cropping.
+            use_resolution_binning (bool, optional): Whether to use resolution binning.
+            map (PipelineImageInput, optional): Differential map image that controls where changes are applied.
+            denoising_start (float, optional): Start point for denoising.
+
+        Returns:
+            Flux2PipelineOutput or tuple: Generated image(s).
+
+        Example:
+            >>> pipe = Flux2KleinDifferentialDiffPipeline.from_pretrained(
+            >>>     "BlackForestLabs/flux2-klein", torch_dtype=torch.float16
+            >>> ).to("cuda")
+            >>> source_image = load_image("https://example.com/source.png")
+            >>> diff_map = load_image("https://example.com/map.png")
+            >>> image = pipe(
+            >>>     prompt="A futuristic cityscape",
+            >>>     image=source_image,
+            >>>     map=diff_map,
+            >>>     strength=0.7,
+            >>> ).images[0]
         """
         self.check_inputs(
             prompt,
