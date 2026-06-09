@@ -2364,10 +2364,40 @@ def _convert_non_diffusers_anima_lora_to_diffusers(state_dict):
 
 
 def _convert_non_diffusers_flux2_lora_to_diffusers(state_dict):
-    converted_state_dict = {}
+    # try scale
+    def get_alpha_scales(down_weight, alpha):
+        rank = down_weight.shape[0]
+        scale = alpha / rank  # LoRA is scaled by 'alpha / rank' in forward pass, so we need to scale it back here
+        scale_down = scale
+        scale_up = 1.0
+        while scale_down * 2 < scale_up:
+            scale_down *= 2
+            scale_up /= 2
+        return scale_down, scale_up
 
-    prefix = "diffusion_model."
-    original_state_dict = {k[len(prefix) :]: v for k, v in state_dict.items()}
+    down_key = ".lora_down.weight"
+    up_key = ".lora_up.weight"
+
+    all_keys = list(state_dict.keys())
+    prefix = "transformer."
+    if all_keys[0].startswith(prefix):
+        for k in all_keys:
+            if k.endswith(down_key):
+                dk = k
+                uk = dk.replace(down_key, up_key)
+                ak = dk.replace(down_key, ".alpha")
+                down_weight = state_dict[dk]
+                up_weight = state_dict[uk]
+                alpha = state_dict[ak]
+
+                scale_down, scale_up = get_alpha_scales(down_weight, alpha)
+                state_dict[k] = down_weight * scale_down
+                state_dict[uk] = up_weight * scale_up
+        original_state_dict = {k[len(prefix) :]: v for k, v in state_dict.items() if ".alpha" not in k}
+
+    else:
+        prefix = "diffusion_model."
+        original_state_dict = {k[len(prefix):]: v for k, v in state_dict.items()}
 
     has_lora_down_up = any("lora_down" in k or "lora_up" in k for k in original_state_dict.keys())
     if has_lora_down_up:

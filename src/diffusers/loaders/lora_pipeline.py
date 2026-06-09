@@ -5866,18 +5866,20 @@ class Flux2LoraLoaderMixin(LoraBaseMixin):
             state_dict = {k: v for k, v in state_dict.items() if "dora_scale" not in k}
 
         is_kohya = any(".lora_down.weight" in k for k in state_dict)
-        if is_kohya:
-            state_dict = _convert_kohya_flux2_lora_to_diffusers(state_dict)
-            # Kohya already takes care of scaling the LoRA parameters with alpha.
-            out = (state_dict, metadata) if return_lora_metadata else state_dict
-            return out
+        # if is_kohya:
+        #     state_dict = _convert_kohya_flux2_lora_to_diffusers(state_dict)
+        #     # Kohya already takes care of scaling the LoRA parameters with alpha.
+        #     out = (state_dict, metadata) if return_lora_metadata else state_dict
+        #     return out
 
         is_peft_format = any(k.startswith("base_model.model.") for k in state_dict)
         if is_peft_format:
             state_dict = {k.replace("base_model.model.", "diffusion_model."): v for k, v in state_dict.items()}
 
         is_ai_toolkit = any(k.startswith("diffusion_model.") for k in state_dict)
-        if is_ai_toolkit:
+        is_onetrainer = any(k.startswith("transformer.") for k in state_dict)
+        if is_ai_toolkit or is_onetrainer:
+            print("HOHOHOHO")
             state_dict = _convert_non_diffusers_flux2_lora_to_diffusers(state_dict)
 
         out = (state_dict, metadata) if return_lora_metadata else state_dict
