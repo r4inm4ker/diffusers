@@ -2375,11 +2375,13 @@ def _convert_non_diffusers_flux2_lora_to_diffusers(state_dict):
             scale_up /= 2
         return scale_down, scale_up
 
-    down_key = ".lora_down.weight"
-    up_key = ".lora_up.weight"
+    converted_state_dict = {}
+
 
     all_keys = list(state_dict.keys())
     prefix = "transformer."
+    down_key = ".lora_down.weight"
+    up_key = ".lora_up.weight"
     if all_keys[0].startswith(prefix):
         for k in all_keys:
             if k.endswith(down_key):
