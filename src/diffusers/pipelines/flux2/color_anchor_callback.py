@@ -3,24 +3,31 @@ import torch
 
 def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
     """Callback that corrects color drift during Flux Klein denoising by anchoring
-    the per-channel DC offset (spatial mean) of the latent toward a reference image's
-    latent statistics.
+    the per-channel statistics (mean and standard deviation) of the latent toward
+    a reference image's latent statistics.
 
-    This mimics the "Color Anchor" node from ComfyUI (e.g. ComfyUI-Flux2Klein-Enhancer).
-    It applies a **mean-only shift** (DC-offset correction) — NOT AdaIN — so that
-    structural detail and texture variance are preserved while only the color cast is nudged.
+    This performs a **per-channel affine color transfer** — matching both the mean
+    (brightness/color cast) and standard deviation (contrast/hue balance) of each
+    latent channel to the anchor image. A mean-only shift cannot correct hue
+    rotation (e.g. purple → red) because hue is encoded in the *relative scale*
+    between channels, not just their offsets.
 
-    **Last-step-only correction** (by default): The correction is applied only at the
-    final denoising step(s) to avoid two problems that occur with per-step correction:
-      1. **Blurriness** — modifying latents at every step pushes them off the model's
-         expected denoising trajectory, reducing sharpness.
-      2. **Color distortion** — at early/intermediate steps the latent is a noisy mixture,
-         and correcting its mean interferes with the model's predictions, causing the
-         model to "fight" the corrections and settle on unexpected colors.
+    The structural detail (high-frequency content) is preserved because the
+    correction is purely per-channel affine: each token is shifted and scaled by
+    the same per-channel factors, so spatial patterns within each channel are
+    unchanged.
 
-    At the last step the latent is nearly clean, so its per-channel spatial mean directly
-    represents the image's color statistics. A simple mean-shift toward the anchor's
-    statistics produces a clean, gentle color correction.
+    **Last-step-only correction** (by default): The correction is applied only at
+    the final denoising step(s) to avoid two problems that occur with per-step
+    correction:
+      1. **Blurriness** — modifying latents at every step pushes them off the
+         model's expected denoising trajectory, reducing sharpness.
+      2. **Color distortion** — at early/intermediate steps the latent is a noisy
+         mixture, and correcting its statistics interferes with the model's
+         predictions, causing the model to "fight" the corrections.
+
+    At the last step the latent is nearly clean, so its per-channel spatial
+    statistics directly represent the image's color characteristics.
 
     Setup (attach these to the pipeline instance before calling):
         pipeline.anchor_latents  — packed reference latent [B, seq_len, C]
@@ -31,7 +38,8 @@ def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
 
     Inside the Flux Klein denoising loop, latents are *packed* as:
         [batch, height*width, channels]   (i.e.  [B, seq_len, C])
-    The per-channel spatial mean is computed over dim=1 (the spatial-token axis).
+    The per-channel spatial statistics are computed over dim=1 (the spatial-token
+    axis).
     """
     latents = callback_kwargs.get("latents")
 
@@ -48,10 +56,6 @@ def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
         return callback_kwargs
 
     # ── only apply at the last N denoising steps ────────────────────────
-    # By default (last_n=1) we correct only at the very last step where
-    # the latent is nearly clean and its means directly represent color.
-    # Increasing last_n (e.g. 2-3) applies correction at more steps for
-    # a stronger effect, at the cost of some sharpness.
     num_steps = getattr(pipeline, "_num_timesteps", 1)
     last_n = getattr(pipeline, "color_anchor_last_n_steps", 1)
     start_step = max(0, num_steps - last_n)
@@ -59,18 +63,27 @@ def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
     if step < start_step:
         return callback_kwargs
 
-    # ── DC-offset (mean-only) color correction ──────────────────────────
+    # ── Affine color transfer (mean + std matching) ─────────────────────
     # latents shape : [B, seq_len,     C]
     # anchor  shape : [B, seq_len_ref, C]   (possibly different spatial size)
     #
-    # Per-channel spatial mean (averaged over the token / spatial dimension):
+    # Per-channel spatial statistics (over the token / spatial dimension):
+    eps = 1e-6  # prevent division by zero for near-constant channels
+
     with torch.no_grad():
         latent_mean = latents.mean(dim=1, keepdim=True)   # [B, 1, C]
-        anchor_mean = anchor.mean(dim=1, keepdim=True)    # [B, 1, C]
+        latent_std = latents.std(dim=1, keepdim=True) + eps  # [B, 1, C]
 
-        # Compute per-channel offset and apply
-        offset = (anchor_mean - latent_mean) * strength
-        latents = latents + offset
+        anchor_mean = anchor.mean(dim=1, keepdim=True)    # [B, 1, C]
+        anchor_std = anchor.std(dim=1, keepdim=True) + eps  # [B, 1, C]
+
+        # Normalize latent to zero-mean / unit-variance, then rescale to
+        # match anchor statistics.  This corrects both color cast (mean)
+        # and hue / contrast balance (std ratio between channels).
+        corrected = (latents - latent_mean) / latent_std * anchor_std + anchor_mean
+
+        # Blend between original and fully-corrected at the given strength
+        latents = torch.lerp(latents, corrected, strength)
 
     callback_kwargs["latents"] = latents
     return callback_kwargs
