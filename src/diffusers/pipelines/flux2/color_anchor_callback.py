@@ -10,12 +10,24 @@ def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
     It applies a **mean-only shift** (DC-offset correction) — NOT AdaIN — so that
     structural detail and texture variance are preserved while only the color cast is nudged.
 
+    **Last-step-only correction** (by default): The correction is applied only at the
+    final denoising step(s) to avoid two problems that occur with per-step correction:
+      1. **Blurriness** — modifying latents at every step pushes them off the model's
+         expected denoising trajectory, reducing sharpness.
+      2. **Color distortion** — at early/intermediate steps the latent is a noisy mixture,
+         and correcting its mean interferes with the model's predictions, causing the
+         model to "fight" the corrections and settle on unexpected colors.
+
+    At the last step the latent is nearly clean, so its per-channel spatial mean directly
+    represents the image's color statistics. A simple mean-shift toward the anchor's
+    statistics produces a clean, gentle color correction.
+
     Setup (attach these to the pipeline instance before calling):
         pipeline.anchor_latents  — packed reference latent [B, seq_len, C]
                                    (produced by the helper ``encode_anchor_image``)
-        pipeline.color_anchor_strength — float 0..1, default 1.0
-        pipeline.color_anchor_decay    — bool, default True (linearly decay strength
-                                         from full at step 0 to 0 at last step)
+        pipeline.color_anchor_strength     — float 0..1, default 0.25
+        pipeline.color_anchor_last_n_steps — int, default 1 (apply only at last step;
+                                             increase to 2-3 for stronger correction)
 
     Inside the Flux Klein denoising loop, latents are *packed* as:
         [batch, height*width, channels]   (i.e.  [B, seq_len, C])
@@ -30,22 +42,21 @@ def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
     anchor = pipeline.anchor_latents  # [B, seq_len_ref, C]  (may differ in seq_len)
 
     # ── configurable hyperparameters (with sensible defaults) ───────────
-    strength = getattr(pipeline, "color_anchor_strength", 1.0)
-    use_decay = getattr(pipeline, "color_anchor_decay", True)
+    strength = getattr(pipeline, "color_anchor_strength", 0.25)
 
     if strength <= 0.0:
         return callback_kwargs
 
-    # ── timestep-aware strength decay ───────────────────────────────────
-    # Apply stronger correction in early (noisy) steps and weaken it toward
-    # the final step so that the model's fine detail is not overridden.
-    effective_strength = strength
-    if use_decay and hasattr(pipeline, "_num_timesteps") and pipeline._num_timesteps > 1:
-        # ``step`` is the 0-based loop index; _num_timesteps is the total count
-        progress = step / (pipeline._num_timesteps - 1)  # 0.0 → 1.0
-        effective_strength = strength * (1.0 - progress)
+    # ── only apply at the last N denoising steps ────────────────────────
+    # By default (last_n=1) we correct only at the very last step where
+    # the latent is nearly clean and its means directly represent color.
+    # Increasing last_n (e.g. 2-3) applies correction at more steps for
+    # a stronger effect, at the cost of some sharpness.
+    num_steps = getattr(pipeline, "_num_timesteps", 1)
+    last_n = getattr(pipeline, "color_anchor_last_n_steps", 1)
+    start_step = max(0, num_steps - last_n)
 
-    if effective_strength <= 0.0:
+    if step < start_step:
         return callback_kwargs
 
     # ── DC-offset (mean-only) color correction ──────────────────────────
@@ -58,7 +69,7 @@ def flux_klein_color_anchor_callback(pipeline, step, timestep, callback_kwargs):
         anchor_mean = anchor.mean(dim=1, keepdim=True)    # [B, 1, C]
 
         # Compute per-channel offset and apply
-        offset = (anchor_mean - latent_mean) * effective_strength
+        offset = (anchor_mean - latent_mean) * strength
         latents = latents + offset
 
     callback_kwargs["latents"] = latents
@@ -120,9 +131,9 @@ if __name__ == "__main__":
     ref_image = ref_image.resize((1024, 1024))
 
     pipe.anchor_latents = encode_anchor_image(ref_image, pipe)
-    # Optional: tweak strength / decay
-    # pipe.color_anchor_strength = 0.8
-    # pipe.color_anchor_decay = True   # (default)
+    # Optional: tweak parameters
+    # pipe.color_anchor_strength = 0.25       # default; increase for stronger correction
+    # pipe.color_anchor_last_n_steps = 1      # default; increase to 2-3 for more effect
 
     # 3. Generate with the color anchor callback
     prompt = (
